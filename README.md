@@ -52,18 +52,28 @@ The model was trained on queries written as
 service asks llama-server how `Batwan search: maayong` goes on, in three
 small steps ([predict.py](predict.py)):
 
-1. **Which word.** The prompt stops *before* the word being typed, and a
-   grammar holds the answer to ` a…`. This is token healing: the model sees
-   the word whole, as it did in training, not cut where the typing stopped.
-2. **Branch.** The two likeliest paths go one token further, so words that
-   share a first token (Gemma writes *maayong* and *maayo* both as ` ma`…)
-   each get a chance, and a word that ends there is seen to end.
-3. **The rest of the word**, greedily, for the best three, all at once.
+1. **Which word.** The prompt stops *before* the word being typed: token
+   healing, so the model sees the word whole, as in training, not cut where
+   the typing stopped. Of its likeliest next tokens, those that agree with
+   ` a…` are kept, and a grammar finds the ones that are not among the
+   likeliest (Gemma writes *salamat* as ` sal` `amat`, and ` sal` is not
+   among the likeliest first tokens; ` sa`, a word of its own, is).
+2. **Branch.** The three likeliest paths go one token further, so words
+   that share a first token (*maayong* and *maayo* both start ` ma`) each
+   get a chance, and a word that ends there is seen to end.
+3. **The rest of the word**, greedily, for the best three, all at once;
+   every point on the way where the word could end is offered too
+   (*kamatis* as well as *kamatison*).
 
-A suggestion's score is the probability of its word. Gemma 4 E2B writes
-about 6 to 9 tokens a second on two CPU cores; a suggestion takes about a
-dozen, so it arrives in a second or two on the free tier. Each visitor's
-latest keystroke wins: an older request still waiting is dropped.
+Every path is scored with the model's own probabilities, read from
+llama-server's raw top-k, not with what a grammar leaves: llama.cpp applies
+a grammar lazily, so its probabilities are sometimes renormalised and
+sometimes not. A suggestion's score is its share of all those found.
+
+Gemma 4 E2B writes about 6 to 9 tokens a second on two CPU cores; a
+suggestion takes a dozen or so, so it arrives in about two seconds on the
+free tier. Each visitor's latest keystroke wins: an older request still
+waiting is dropped.
 
 ## The API
 
@@ -115,8 +125,10 @@ page (`PREDICT_ALLOWED_ORIGINS`). `/docs` has the OpenAPI page.
 
 1. Create a **Docker** Space, `alsersugasawa/batwan-predictive-text`, and
    push this repository to it.
-2. The model repository is public, so no secret is needed. If it is made
-   private, add `HF_TOKEN` (read access) as a Space secret.
+2. The Space downloads the GGUF from the model repository when it starts.
+   Make that repository public, or add `HF_TOKEN` as a Space secret: a
+   fine-grained token with read access to it alone. Without either, the
+   page says the model could not be loaded.
 3. Hardware: the free **CPU basic** tier (2 vCPU, 16 GB) holds the 3 GB
    model with room to spare. A larger CPU tier makes suggestions faster;
    llama-server uses every core (`LLM_THREADS`).
@@ -130,9 +142,13 @@ page (`PREDICT_ALLOWED_ORIGINS`). `/docs` has the OpenAPI page.
 | `LLM_CTX` | `2048` | llama-server's context, shared by its slots |
 | `LLM_PARALLEL` | `4` | slots: the beams of one suggestion run side by side |
 | `LLM_THREADS` | all cores | |
+| `PREDICT_CANDIDATES` | `16` | the model's top tokens read at each step |
+| `PREDICT_BRANCH` | `3` | paths taken one token further before the beams are chosen |
 | `PREDICT_BEAMS` | `3` | paths carried to the end of their word |
 | `PREDICT_MAX_TOKENS` | `4` | tokens a beam may take to end its word |
+| `PREDICT_END_PROBS` | `12` | top tokens read at each step of a beam, for where its word could end |
 | `PREDICT_LIMIT` | `3` | suggestions by default |
+| `PREDICT_MIN_SHARE` | `0.02` | suggestions with a smaller share are not shown (one always is) |
 | `PREDICT_RATE_LIMIT` | `120` | requests per visitor per minute |
 | `PREDICT_CACHE_SECONDS` | `21600` | how long an answer is kept, in memory |
 | `PREDICT_ALLOWED_ORIGINS` | the Space, batwan.org, batwan-app.alser.ai | pages that may call the API from a browser |

@@ -37,13 +37,13 @@ QUERIES = {
 EOS = "<eos>"
 
 
-def tokens_of(words):
-    return [t for w in words for t in PIECES[w]]
+def tokens_of(words, pieces=PIECES):
+    return [t for w in words for t in pieces[w]]
 
 
 class FakeServer:
-    def __init__(self, queries=QUERIES):
-        self.queries = {q: (p, tokens_of(q.split()) + [EOS]) for q, p in queries.items()}
+    def __init__(self, queries=QUERIES, pieces=PIECES):
+        self.queries = {q: (p, tokens_of(q.split(), pieces) + [EOS]) for q, p in queries.items()}
         self.calls = []
 
     # -- the model ---------------------------------------------------------
@@ -98,6 +98,15 @@ class FakeServer:
         out = []
         for prompt in prompts:
             prefix = self.prompt_tokens(prompt)
+            if body["n_predict"] == 1 and not body.get("post_sampling_probs"):
+                # Raw: the model's own distribution, every token, unfiltered.
+                top = sorted(self.next_tokens(prefix).items(), key=lambda kv: -kv[1])
+                top = top[:body["n_probs"]]
+                out.append({"content": "", "completion_probabilities": [{
+                    "id": top[0][0] if top else EOS, "logprob": math.log(top[0][1]) if top else 0.0,
+                    "top_logprobs": [{"id": t, "token": "" if t == EOS else t, "logprob": math.log(p)}
+                                     for t, p in top]}]})
+                continue
             if body["n_predict"] == 1:
                 dist = {t: p for t, p in self.next_tokens(prefix).items()
                         if self.allowed(t, gram, "")}
@@ -113,11 +122,16 @@ class FakeServer:
                 if not dist:
                     break
                 t, p = max(dist.items(), key=lambda kv: kv[1])
-                steps.append({"id": t, "token": "" if t == EOS else t, "logprob": math.log(p)})
+                raw = sorted(self.next_tokens(prefix).items(), key=lambda kv: -kv[1])[:body["n_probs"]]
+                steps.append({"id": t, "token": "" if t == EOS else t, "logprob": math.log(p),
+                              "top_logprobs": [{"id": x, "token": "" if x == EOS else x,
+                                                "logprob": math.log(q)} for x, q in raw]})
                 if t == EOS:
                     stop = "eos"
                     break
                 if body.get("stop") == [" "] and " " in t:
+                    # llama-server leaves out the step a stop string fired on.
+                    steps.pop()
                     stop = "word"
                     break
                 generated += t
@@ -175,7 +189,7 @@ def test_two_words_that_share_a_first_token_are_both_found():
     assert texts(out)[:2] == ["maayong", "maayo"]
     assert out["items"][0]["completion"] == "yong"
     first = [b for path, b in server.calls if path == "/completion"][0]
-    assert first["grammar"].startswith('root ::= " maa"') and first["post_sampling_probs"]
+    assert "grammar" not in first and first["post_sampling_probs"] is False
 
 
 def test_scores_are_the_probability_of_the_word():
@@ -229,6 +243,59 @@ def test_half_a_word_is_never_suggested():
     # does not end, and is left out rather than offered as "palangg".
     out = run(p.suggest("pa"))
     assert all(t in ("palangga",) for t in texts(out)) and "pal" not in texts(out)
+
+
+def test_a_likely_word_is_not_outranked_by_a_likely_prefix_of_another():
+    # " sa" is a common word on its own; as the start of "sala..." it is
+    # rare. Scored by raw probability, "salamat" (one token, " salamat")
+    # wins over " sa" + "la" + "ndo", however likely " sa" is.
+    queries = {"sa": 0.5, "salamat": 0.3, "salando": 0.01}
+    pieces = {"sa": [" sa"], "salamat": [" salamat"], "salando": [" sa", "la", "ndo"]}
+    server = FakeServer(queries, pieces)
+    p, _ = predictor(server, limit=3)
+    out = run(p.suggest("sala"))
+    assert texts(out)[0] == "salamat"
+    assert out["items"][0]["score"] > 0.9
+
+
+def test_a_word_whose_first_token_is_not_in_the_raw_top_is_found_with_a_grammar():
+    p, server = predictor(limit=3, candidates=1)
+    # With only the single likeliest token in the raw top, nothing agrees
+    # with "pal"; the grammar finds " pal".
+    assert texts(run(p.suggest("pal"))) == ["palangga"]
+    assert any(b.get("grammar", "").startswith('root ::= " pal"')
+               for path, b in server.calls if path == "/completion")
+
+
+def test_grammar_found_first_tokens_join_on_the_raw_scale():
+    # Raw top 2 after the prompt: " ma" (0.56) and " salamat" (0.26); the
+    # grammar for " pa" finds " pal" (0.18), renormalised to 1.0 among what
+    # it allows. With no token in both lists there is nothing to scale by,
+    # and with one there is: either way palangga is found, scored as itself.
+    p, _ = predictor(limit=3, candidates=2)
+    out = run(p.suggest("pa"))
+    assert texts(out) == ["palangga"] and out["items"][0]["score"] == 1.0
+
+
+def test_a_word_is_offered_where_it_could_end_even_if_the_beam_goes_on():
+    # "kamatis" is a query; "kamatison" is likelier still, and the beam
+    # goes there. Both are offered, each with its own chance of ending.
+    queries = {"kamatis": 0.2, "kamatison": 0.3}
+    pieces = {"kamatis": [" kam", "atis"], "kamatison": [" kam", "atis", "on"]}
+    p, _ = predictor(FakeServer(queries, pieces), limit=3, branch=0)
+    out = run(p.suggest("kamatis"))
+    assert sorted(texts(out)) == ["kamatis", "kamatison"]
+    scores = {i["text"]: i["score"] for i in out["items"]}
+    assert scores["kamatison"] == pytest.approx(0.6, abs=0.01)
+    assert scores["kamatis"] == pytest.approx(0.4, abs=0.01)
+
+
+def test_a_long_tail_is_not_shown_but_one_suggestion_always_is():
+    p, _ = predictor(limit=4, min_share=0.05)
+    items = run(p.suggest("maayong a"))["items"]
+    assert [i["text"] for i in items] == ["maayong aga", "maayong adlaw"]     # "ad" has ~1.7%
+    p, _ = predictor(limit=4, min_share=0.99)
+    assert len(run(p.suggest("maayong a"))["items"]) == 1
 
 
 def test_nothing_the_model_does_not_know():

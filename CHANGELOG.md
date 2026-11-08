@@ -21,10 +21,14 @@ go together share a version number.
 - **`GET /api/suggest`**, shaped like batwan.org's own (`items` with `text`,
   and `"type": "predict"`): the rest of the word being typed, or after a
   space the next word, in `any`, `hil` or `en`, with each suggestion's
-  probability and whether the model ended the query there. Token healing
-  and a grammar keep every suggestion to what was typed; words that share a
-  first token are told apart by one branching step; three beams finish
-  their words together (predict.py).
+  share and whether the model ended the query there (predict.py). Token
+  healing: the prompt stops before the word being typed, and the first
+  tokens that agree with it come from the model's raw top and from a
+  grammar, put on one scale. Three paths branch one token further, so
+  words that share a first token are told apart; three beams finish their
+  words together, and every point where a word could end is offered.
+  Paths are scored with the model's raw probabilities throughout, not with
+  a grammar's, which llama.cpp renormalises only sometimes.
 - A visitor's newest keystroke wins: an older request still waiting for the
   model is answered empty (`"stale": true`). Answers are cached in memory
   for six hours. 120 requests a minute per visitor. CORS for batwan.org,

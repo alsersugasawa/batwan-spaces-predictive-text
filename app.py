@@ -53,9 +53,12 @@ FRAME_ANCESTORS = os.getenv("SPACE_FRAME_ANCESTORS", "https://huggingface.co")
 SETTINGS = predict.Settings(
     beams=int(os.getenv("PREDICT_BEAMS", "3")),
     candidates=int(os.getenv("PREDICT_CANDIDATES", "16")),
+    branch=int(os.getenv("PREDICT_BRANCH", "3")),
     max_tokens=int(os.getenv("PREDICT_MAX_TOKENS", "4")),
+    end_probs=int(os.getenv("PREDICT_END_PROBS", "12")),
     words=int(os.getenv("PREDICT_WORDS", "0")),
     limit=int(os.getenv("PREDICT_LIMIT", "3")),
+    min_share=float(os.getenv("PREDICT_MIN_SHARE", "0.02")),
 )
 
 STARTED = time.time()
