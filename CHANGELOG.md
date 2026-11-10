@@ -7,7 +7,7 @@ Space's packaging; the model's are in
 batwan-ai-gemma-4-e2b-it-predictive-text's changelog. A release of each that
 go together share a version number.
 
-## [1.0.0] - 2026-11-07
+## [1.0.0] - 2026-11-09
 
 ### Added
 
